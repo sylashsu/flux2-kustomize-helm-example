@@ -14,7 +14,7 @@ upgrade the Helm releases to their latest chart version based on semver ranges.
 
 ## Prerequisites
 
-You will need a Kubernetes cluster version 1.16 or newer and kubectl version 1.18.
+You will need a Kubernetes cluster version 1.28 or newer.
 For a quick local test, you can use [Kubernetes kind](https://kind.sigs.k8s.io/docs/user/quick-start/).
 Any other Kubernetes setup will work as well though.
 
@@ -22,7 +22,7 @@ In order to follow the guide you'll need a GitHub account and a
 [personal access token](https://help.github.com/en/github/authenticating-to-github/creating-a-personal-access-token-for-the-command-line)
 that can create repositories (check all permissions under `repo`).
 
-Install the Flux CLI on MacOS and Linux using Homebrew:
+Install the Flux CLI on macOS or Linux using Homebrew:
 
 ```sh
 brew install fluxcd/tap/flux
@@ -39,7 +39,7 @@ curl -s https://fluxcd.io/install.sh | sudo bash
 The Git repository contains the following top directories:
 
 - **apps** dir contains Helm releases with a custom configuration per cluster
-- **infrastructure** dir contains common infra tools such as NGINX ingress controller and Helm repository definitions
+- **infrastructure** dir contains common infra tools such as ingress-nginx and cert-manager
 - **clusters** dir contains the Flux configuration per cluster
 
 ```
@@ -48,13 +48,14 @@ The Git repository contains the following top directories:
 │   ├── production 
 │   └── staging
 ├── infrastructure
-│   ├── nginx
-│   ├── redis
-│   └── sources
+│   ├── configs
+│   └── controllers
 └── clusters
     ├── production
     └── staging
 ```
+
+### Applications
 
 The apps configuration is structured into:
 
@@ -68,7 +69,8 @@ The apps configuration is structured into:
 │   └── podinfo
 │       ├── kustomization.yaml
 │       ├── namespace.yaml
-│       └── release.yaml
+│       ├── release.yaml
+│       └── repository.yaml
 ├── production
 │   ├── kustomization.yaml
 │   └── podinfo-patch.yaml
@@ -77,10 +79,10 @@ The apps configuration is structured into:
     └── podinfo-patch.yaml
 ```
 
-In **apps/base/podinfo/** dir we have a HelmRelease with common values for both clusters:
+In **apps/base/podinfo/** dir we have a Flux `HelmRelease` with common values for both clusters:
 
 ```yaml
-apiVersion: helm.toolkit.fluxcd.io/v2beta1
+apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
   name: podinfo
@@ -94,19 +96,17 @@ spec:
         kind: HelmRepository
         name: podinfo
         namespace: flux-system
-  interval: 5m
+  interval: 50m
   values:
-    cache: redis-master.redis:6379
     ingress:
       enabled: true
-      annotations:
-        kubernetes.io/ingress.class: nginx
+      className: nginx
 ```
 
 In **apps/staging/** dir we have a Kustomize patch with the staging specific values:
 
 ```yaml
-apiVersion: helm.toolkit.fluxcd.io/v2beta1
+apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
   name: podinfo
@@ -128,7 +128,7 @@ the `HelmRelease` to the latest chart version including alpha, beta and pre-rele
 In **apps/production/** dir we have a Kustomize patch with the production specific values:
 
 ```yaml
-apiVersion: helm.toolkit.fluxcd.io/v2beta1
+apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
   name: podinfo
@@ -146,46 +146,94 @@ spec:
 Note that with ` version: ">=1.0.0"` we configure Flux to automatically upgrade
 the `HelmRelease` to the latest stable chart version (alpha, beta and pre-releases will be ignored).
 
-Infrastructure:
+### Infrastructure
+
+The infrastructure is structured into:
+
+- **infrastructure/controllers/** dir contains namespaces and Helm release definitions for Kubernetes controllers
+- **infrastructure/configs/** dir contains Kubernetes custom resources such as cert issuers and networks policies
 
 ```
 ./infrastructure/
-├── nginx
-│   ├── kustomization.yaml
-│   ├── namespace.yaml
-│   └── release.yaml
-├── redis
-│   ├── kustomization.yaml
-│   ├── namespace.yaml
-│   └── release.yaml
-└── sources
-    ├── bitnami.yaml
-    ├── kustomization.yaml
-    └── podinfo.yaml
+├── configs
+│   ├── cluster-issuers.yaml
+│   └── kustomization.yaml
+└── controllers
+    ├── cert-manager.yaml
+    ├── ingress-nginx.yaml
+    └── kustomization.yaml
 ```
 
-In **infrastructure/sources/** dir we have the Helm repositories definitions:
+In **infrastructure/controllers/** dir we have the Flux `HelmRepository` and `HelmRelease` definitions such as:
 
 ```yaml
-apiVersion: source.toolkit.fluxcd.io/v1beta2
-kind: HelmRepository
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
 metadata:
-  name: podinfo
-spec:
-  interval: 5m
-  url: https://stefanprodan.github.io/podinfo
----
-apiVersion: source.toolkit.fluxcd.io/v1beta2
-kind: HelmRepository
-metadata:
-  name: bitnami
+  name: cert-manager
+  namespace: cert-manager
 spec:
   interval: 30m
-  url: https://charts.bitnami.com/bitnami
+  chart:
+    spec:
+      chart: cert-manager
+      version: "1.x"
+      sourceRef:
+        kind: HelmRepository
+        name: cert-manager
+        namespace: cert-manager
+      interval: 12h
+  values:
+    installCRDs: true
 ```
 
-Note that with ` interval: 5m` we configure Flux to pull the Helm repository index every five minutes.
-If the index contains a new chart version that matches a `HelmRelease` semver range, Flux will upgrade the release.
+Note that with ` interval: 12h` we configure Flux to pull the Helm repository index every twelfth hours to check for updates.
+If the new chart version that matches the `1.x` semver range is found, Flux will upgrade the release.
+
+In **infrastructure/configs/** dir we have Kubernetes custom resources, such as the Let's Encrypt issuer:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt
+spec:
+  acme:
+    # Replace the email address with your own contact email
+    email: fluxcdbot@users.noreply.github.com
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-nginx
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+```
+
+In **clusters/production/infrastructure.yaml** we replace the Let's Encrypt server value to point to the production API:
+
+```yaml
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infra-configs
+  namespace: flux-system
+spec:
+  # ...omitted for brevity
+  dependsOn:
+    - name: infra-controllers
+  patches:
+    - patch: |
+        - op: replace
+          path: /spec/acme/server
+          value: https://acme-v02.api.letsencrypt.org/directory
+      target:
+        kind: ClusterIssuer
+        name: letsencrypt
+```
+
+Note that with `dependsOn` we tell Flux to first install or upgrade the controllers and only then the configs.
+This ensures that the Kubernetes CRDs are registered on the cluster, before Flux applies any custom resources.
 
 ## Bootstrap staging and production
 
@@ -201,10 +249,10 @@ The clusters dir contains the Flux configuration:
     └── infrastructure.yaml
 ```
 
-In **clusters/staging/** dir we have the Kustomization definitions:
+In **clusters/staging/** dir we have the Flux Kustomization definitions, for example:
 
 ```yaml
-apiVersion: kustomize.toolkit.fluxcd.io/v1beta2
+apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
   name: apps
@@ -212,26 +260,13 @@ metadata:
 spec:
   interval: 10m0s
   dependsOn:
-    - name: infrastructure
+    - name: infra-configs
   sourceRef:
     kind: GitRepository
     name: flux-system
   path: ./apps/staging
   prune: true
   wait: true
----
-apiVersion: kustomize.toolkit.fluxcd.io/v1beta2
-kind: Kustomization
-metadata:
-  name: infrastructure
-  namespace: flux-system
-spec:
-  interval: 10m0s
-  sourceRef:
-    kind: GitRepository
-    name: flux-system
-  path: ./infrastructure
-  prune: true
 ```
 
 Note that with `path: ./apps/staging` we configure Flux to sync the staging Kustomize overlay and 
@@ -266,25 +301,26 @@ flux bootstrap github \
 The bootstrap command commits the manifests for the Flux components in `clusters/staging/flux-system` dir
 and creates a deploy key with read-only access on GitHub, so it can pull changes inside the cluster.
 
-Watch for the Helm releases being install on staging:
+Watch for the Helm releases being installed on staging:
 
 ```console
-$ watch flux get helmreleases --all-namespaces 
-NAMESPACE	NAME   	REVISION	SUSPENDED	READY	MESSAGE                          
-nginx    	nginx  	5.6.14  	False    	True 	release reconciliation succeeded	
-podinfo  	podinfo	5.0.3   	False    	True 	release reconciliation succeeded	
-redis    	redis  	11.3.4  	False    	True 	release reconciliation succeeded
+$ watch flux get helmreleases --all-namespaces
+
+NAMESPACE    	NAME         	REVISION	SUSPENDED	READY	MESSAGE 
+cert-manager 	cert-manager 	v1.11.0 	False    	True 	Release reconciliation succeeded
+ingress-nginx	ingress-nginx	4.4.2   	False    	True 	Release reconciliation succeeded
+podinfo      	podinfo      	6.3.0   	False    	True 	Release reconciliation succeeded
 ```
 
 Verify that the demo app can be accessed via ingress:
 
 ```console
-$ kubectl -n nginx port-forward svc/nginx-ingress-controller 8080:80 &
+$ kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 8080:80 &
 
 $ curl -H "Host: podinfo.staging" http://localhost:8080
 {
   "hostname": "podinfo-59489db7b5-lmwpn",
-  "version": "5.0.3"
+  "version": "6.2.3"
 }
 ```
 
@@ -304,126 +340,13 @@ Watch the production reconciliation:
 
 ```console
 $ flux get kustomizations --watch
-NAME          	REVISION                                        READY
-apps          	main/797cd90cc8e81feb30cfe471a5186b86daf2758d	True
-flux-system   	main/797cd90cc8e81feb30cfe471a5186b86daf2758d	True
-infrastructure	main/797cd90cc8e81feb30cfe471a5186b86daf2758d	True
+
+NAME             	REVISION     	SUSPENDED	READY	MESSAGE                         
+apps             	main/696182e	False    	True 	Applied revision: main/696182e	
+flux-system      	main/696182e	False    	True 	Applied revision: main/696182e	
+infra-configs    	main/696182e	False    	True 	Applied revision: main/696182e	
+infra-controllers	main/696182e	False    	True 	Applied revision: main/696182e	
 ```
-
-## Encrypt Kubernetes secrets
-
-In order to store secrets safely in a Git repository,
-you can use Mozilla's SOPS CLI to encrypt Kubernetes secrets with OpenPGP or KMS.
-
-Install [gnupg](https://www.gnupg.org/) and [sops](https://github.com/mozilla/sops):
-
-```sh
-brew install gnupg sops
-```
-
-Generate a GPG key for Flux without specifying a passphrase and retrieve the GPG key ID:
-
-```console
-$ gpg --full-generate-key
-Email address: fluxcdbot@users.noreply.github.com
-
-$ gpg --list-secret-keys fluxcdbot@users.noreply.github.com
-sec   rsa3072 2020-09-06 [SC]
-      1F3D1CED2F865F5E59CA564553241F147E7C5FA4
-```
-
-Create a Kubernetes secret on your clusters with the private key:
-
-```sh
-gpg --export-secret-keys \
---armor 1F3D1CED2F865F5E59CA564553241F147E7C5FA4 |
-kubectl create secret generic sops-gpg \
---namespace=flux-system \
---from-file=sops.asc=/dev/stdin
-```
-
-Generate a Kubernetes secret manifest and encrypt the secret's data field with sops:
-
-```sh
-kubectl -n redis create secret generic redis-auth \
---from-literal=password=change-me \
---dry-run=client \
--o yaml > infrastructure/redis/redis-auth.yaml
-
-sops --encrypt \
---pgp=1F3D1CED2F865F5E59CA564553241F147E7C5FA4 \
---encrypted-regex '^(data|stringData)$' \
---in-place infrastructure/redis/redis-auth.yaml
-```
-
-Add the secret to `infrastructure/redis/kustomization.yaml`:
-
-```yaml
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-namespace: redis
-resources:
-  - namespace.yaml
-  - release.yaml
-  - redis-auth.yaml
-```
-
-Enable decryption on your clusters by editing the `infrastructure.yaml` files:
-
-```yaml
-apiVersion: kustomize.toolkit.fluxcd.io/v1beta2
-kind: Kustomization
-metadata:
-  name: infrastructure
-  namespace: flux-system
-spec:
-  # content omitted for brevity
-  decryption:
-    provider: sops
-    secretRef:
-      name: sops-gpg
-```
-
-Export the public key so anyone with access to the repository can encrypt secrets but not decrypt them:
-
-```sh
-gpg --export -a fluxcdbot@users.noreply.github.com > public.key
-```
-
-Push the changes to the main branch:
-
-```sh
-git add -A && git commit -m "add encrypted secret" && git push
-```
-
-Verify that the secret has been created in the `redis` namespace on both clusters:
-
-```sh
-kubectl --context staging -n redis get secrets
-kubectl --context production -n redis get secrets
-```
-
-You can use Kubernetes secrets to provide values for your Helm releases:
-
-```yaml
-apiVersion: helm.toolkit.fluxcd.io/v2beta1
-kind: HelmRelease
-metadata:
-  name: redis
-spec:
-  # content omitted for brevity
-  values:
-    usePassword: true
-  valuesFrom:
-  - kind: Secret
-    name: redis-auth
-    valuesKey: password
-    targetPath: password
-```
-
-Find out more about Helm releases values overrides in the
-[docs](https://fluxcd.io/flux/components/helm/helmreleases/#values-overrides).
-
 
 ## Add clusters
 
